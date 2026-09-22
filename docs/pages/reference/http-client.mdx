@@ -13,6 +13,7 @@ Every upstream you configure gets its own persistent, pre-warmed connection — 
 
 **What you get:**
 - One connection pool per upstream, created once and reused forever
+- HTTP/2 multiplexing when an HTTPS upstream advertises it
 - Transparent gzip in both directions, pooled to avoid allocation pressure
 - SOCKS5 / HTTP proxy rotation via lock-free round-robin
 - OTel `traceparent` injected on every outbound call automatically
@@ -118,6 +119,7 @@ Reference: https://docs.erpc.cloud/reference/http-client.llms.txt`}
 
 **Transport construction.** Each `GenericHttpJsonRpcClient` owns its own `http.Transport`:
 - `DialContext` via `util.DefaultOutboundDialer()`: `net.Dialer{Timeout: 10s, KeepAlive: 15s}`. The 15-second probe interval means wedged TCP flows die in ~45 seconds (3 probes), versus the Linux kernel default of ~7200 seconds.
+- `ForceAttemptHTTP2: true` explicitly enables HTTP/2 negotiation despite the custom dialer. HTTPS endpoints that advertise HTTP/2 can therefore multiplex requests instead of opening one HTTP/1.1 connection per concurrent request.
 - `MaxConnsPerHost: 0` (unlimited) is intentional. The prior default of 2 capped throughput at ~5 req/s per host with 400ms upstream latency; removing the cap makes the OS TCP stack the only limit. Validated in `clients/http_connection_test.go`.
 - Overall `http.Client.Timeout` is 60 seconds (includes body read).
 
@@ -344,7 +346,7 @@ Same headers except forwarded headers (absent). Body is a JSON array of `JsonRpc
 8. **Empty proxy pool falls back to direct transport.** If `GetClient` returns an error (pool created with zero URLs), the client logs an error and uses the direct transport. Startup validation should prevent this in production. Source: <SourceLink file="clients/proxy_pool_registry.go" lines="69-71" />
 9. **`MaxConnsPerHost: 0` is deliberate.** Go's prior default of 2 capped throughput at ~5 req/s per host with 400ms latency. Unlimited removes the queue; the OS TCP stack becomes the only cap. Source: <SourceLink file="clients/http_connection_test.go" lines="141-414" />
 10. **No per-upstream TLS configuration.** Custom CA bundles, client certificates, and `InsecureSkipVerify` are not supported for HTTP upstreams. Go uses the system CA bundle. Source: <SourceLink file="clients/http_json_rpc_client.go" lines="109-118" />
-11. **HTTP/2 is not explicitly enabled.** `ForceAttemptHTTP2` is not set. HTTP/2 may negotiate via ALPN on `https://` upstreams that offer it, but this is unverified. Proxy transports are HTTP/1.1 tunnels. Source: <SourceLink file="clients/http_json_rpc_client.go" lines="109-118" />
+11. **HTTP/2 is explicitly attempted, not required.** `ForceAttemptHTTP2: true` restores automatic HTTP/2 negotiation that Go otherwise disables when a custom dialer is set. HTTPS endpoints that do not advertise HTTP/2 continue to use HTTP/1.1. Source: <SourceLink file="clients/transport_pool.go" lines="72-84" />, <SourceLink file="clients/transport_pool_test.go" lines="145-162" />
 12. **Batch single-object response broadcasts to all callers.** When an upstream returns `{"jsonrpc":"2.0","error":{...},"id":null}`, every pending request in the batch receives the same response — intended for upstream-wide rate-limit errors. Source: <SourceLink file="clients/http_json_rpc_client.go" lines="606-636" />
 13. **Partial batch response leaves unmatched callers with an error.** If the array is shorter than queued requests, absent IDs receive `"no response received for request ID: N"`, logged as ERROR with the full response body. Source: <SourceLink file="clients/http_json_rpc_client.go" lines="597-605" />
 14. **5ms race-fix window for timeout sentinels in batch.** When `batchCtx` expires with `DeadlineExceeded`, the per-request context `Cause` may lag by a few microseconds. The client waits up to 5ms for the cause to stabilize so `ErrDynamicTimeoutExceeded` sentinels are preserved for the upstream classifier. Source: <SourceLink file="clients/http_json_rpc_client.go" lines="471-479" />

@@ -72,6 +72,7 @@ func (p *TransportPool) size() int {
 func newDefaultTransport() *http.Transport {
 	return &http.Transport{
 		DialContext:           util.DefaultOutboundDialer().DialContext,
+		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          1024,
 		MaxIdleConnsPerHost:   256,
 		MaxConnsPerHost:       0, // Unlimited active connections (prevents bottleneck)

@@ -2,6 +2,7 @@ package clients
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -128,6 +129,7 @@ func TestNewDefaultTransport_Config(t *testing.T) {
 	tr := newDefaultTransport()
 
 	require.NotNil(t, tr.DialContext, "DialContext must be set (kernel TCP keepalive)")
+	require.True(t, tr.ForceAttemptHTTP2, "custom transports must explicitly enable HTTP/2 negotiation")
 	require.Equal(t, 1024, tr.MaxIdleConns)
 	require.Equal(t, 256, tr.MaxIdleConnsPerHost)
 	require.Equal(t, 0, tr.MaxConnsPerHost, "active connections must stay unlimited")
@@ -138,6 +140,25 @@ func TestNewDefaultTransport_Config(t *testing.T) {
 
 	// Each call builds a fresh transport (the pool is what makes them shared).
 	require.NotSame(t, tr, newDefaultTransport())
+}
+
+func TestNewDefaultTransport_NegotiatesHTTP2(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	tr := newDefaultTransport()
+	serverTransport, ok := server.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+	tr.TLSClientConfig = serverTransport.TLSClientConfig.Clone()
+
+	resp, err := (&http.Client{Transport: tr}).Get(server.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 2, resp.ProtoMajor)
 }
 
 // TestSharedTransportPool_Global verifies the package-global instance the HTTP
